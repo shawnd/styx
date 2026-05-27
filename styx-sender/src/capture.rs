@@ -589,7 +589,7 @@ impl Dispatch<WlPointer, ()> for State {
                     }
                     let (span_min, span_max) = combined_span(&state.windows, state.edge);
                     let source_height = span_max - span_min;
-                    let from_bottom = match state.edge {
+                    let from_bottom_raw = match state.edge {
                         Edge::Left | Edge::Right => {
                             let global_y = window.position.1 as f64 + surface_y;
                             span_max - global_y
@@ -599,12 +599,16 @@ impl Dispatch<WlPointer, ()> for State {
                             span_max - global_x
                         }
                     };
-                    // Block crossover above the receiver's screen height.
-                    if let Some(max) = state.max_from_bottom {
-                        if from_bottom > max {
-                            return;
+                    // Proportional scaling: map full sender span to full receiver
+                    // span instead of bottom/right-aligned 1:1 with crossover
+                    // blocking. Requires max_from_bottom from a prior round-trip;
+                    // first crossover falls back to raw position.
+                    let from_bottom = match state.max_from_bottom {
+                        Some(receiver_span) if source_height > 0.0 => {
+                            (from_bottom_raw / source_height) * receiver_span
                         }
-                    }
+                        _ => from_bottom_raw,
+                    };
                     state.grab(window, pointer, serial);
                     state.pending_events.push_back(CaptureEvent::Begin { from_bottom, source_height });
                 }

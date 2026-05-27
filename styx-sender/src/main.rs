@@ -408,24 +408,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             if !geoms.is_empty() {
-                                // Compute the combined Y span across all configured monitors
-                                // and map from_bottom to a global Y, then find the monitor
-                                // whose Y range contains that point (clamping to the nearest
-                                // if the target falls in a gap).
-                                let combined_bottom = geoms.iter().map(|g| g.y + g.height).max().unwrap();
-                                let target_y = combined_bottom - from_bottom.round() as i32;
-                                let target = geoms.iter()
-                                    .find(|g| target_y >= g.y && target_y < g.y + g.height)
-                                    .or_else(|| geoms.iter().min_by_key(|g| {
-                                        let mid = g.y + g.height / 2;
-                                        (mid - target_y).abs()
-                                    }))
-                                    .unwrap();
-                                let y = target_y.clamp(target.y, target.y + target.height - 1);
-                                let x = match edge {
-                                    capture::Edge::Left => target.x + 2,
-                                    capture::Edge::Right => target.x + target.width - 2,
-                                    capture::Edge::Top | capture::Edge::Bottom => target.x + target.width / 2,
+                                // Proportional return: scale the receiver's from_bottom
+                                // (distance from the far end of its edge span, in
+                                // receiver pixels) into the sender's combined edge span
+                                // so the cursor re-enters at the matching fraction.
+                                let (x, y) = match edge {
+                                    capture::Edge::Left | capture::Edge::Right => {
+                                        let combined_top = geoms.iter().map(|g| g.y).min().unwrap();
+                                        let combined_bottom = geoms.iter().map(|g| g.y + g.height).max().unwrap();
+                                        let local_span = (combined_bottom - combined_top) as f64;
+                                        let scaled = if source_height > 0.0 {
+                                            (from_bottom / source_height) * local_span
+                                        } else {
+                                            from_bottom
+                                        };
+                                        let target_y = combined_bottom - scaled.round() as i32;
+                                        let target = geoms.iter()
+                                            .find(|g| target_y >= g.y && target_y < g.y + g.height)
+                                            .or_else(|| geoms.iter().min_by_key(|g| {
+                                                let mid = g.y + g.height / 2;
+                                                (mid - target_y).abs()
+                                            }))
+                                            .unwrap();
+                                        let y = target_y.clamp(target.y, target.y + target.height - 1);
+                                        let x = match edge {
+                                            capture::Edge::Left => target.x + 2,
+                                            capture::Edge::Right => target.x + target.width - 2,
+                                            _ => unreachable!(),
+                                        };
+                                        (x, y)
+                                    }
+                                    capture::Edge::Top | capture::Edge::Bottom => {
+                                        let combined_left = geoms.iter().map(|g| g.x).min().unwrap();
+                                        let combined_right = geoms.iter().map(|g| g.x + g.width).max().unwrap();
+                                        let local_span = (combined_right - combined_left) as f64;
+                                        let scaled = if source_height > 0.0 {
+                                            (from_bottom / source_height) * local_span
+                                        } else {
+                                            from_bottom
+                                        };
+                                        let target_x = combined_right - scaled.round() as i32;
+                                        let target = geoms.iter()
+                                            .find(|g| target_x >= g.x && target_x < g.x + g.width)
+                                            .or_else(|| geoms.iter().min_by_key(|g| {
+                                                let mid = g.x + g.width / 2;
+                                                (mid - target_x).abs()
+                                            }))
+                                            .unwrap();
+                                        let x = target_x.clamp(target.x, target.x + target.width - 1);
+                                        let y = match edge {
+                                            capture::Edge::Top => target.y + 2,
+                                            capture::Edge::Bottom => target.y + target.height - 2,
+                                            _ => unreachable!(),
+                                        };
+                                        (x, y)
+                                    }
                                 };
                                 let _ = hyprland::warp_cursor(x, y).await;
                             }
