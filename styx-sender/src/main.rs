@@ -370,6 +370,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     break; // reconnect
                                 }
                             }
+                            if evdev_capture.take_escape_signal() {
+                                log::info!("Super+M intercepted, releasing capture and running styx-toggle");
+                                release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                                // Suppress the next edge crossover so the
+                                // user's M release doesn't immediately
+                                // re-trigger capture before styx-toggle's
+                                // `systemctl stop` arrives as SIGTERM.
+                                return_cooldown = Some(time::Instant::now() + Duration::from_millis(1500));
+                                if let Err(e) = std::process::Command::new("styx-toggle").spawn() {
+                                    log::warn!("failed to spawn styx-toggle: {e}");
+                                }
+                            }
                         }
                         None => {
                             log::warn!("keyboard device lost");

@@ -14,6 +14,13 @@ pub struct EvdevCapture {
     held_keys: HashSet<u32>,
     keys_at_grab: HashSet<u32>,
     grabbed: bool,
+    // Super+M is the local Hyprland binding for `styx-toggle`. While the
+    // sender holds an exclusive evdev grab the compositor never sees it,
+    // so we intercept it here: the M press/release/repeat is swallowed
+    // (never forwarded to the receiver) and a one-shot signal is raised
+    // for main to release the grab and re-run styx-toggle.
+    escape_armed: bool,
+    escape_signal: bool,
 }
 
 impl EvdevCapture {
@@ -42,6 +49,8 @@ impl EvdevCapture {
             held_keys: HashSet::new(),
             keys_at_grab: HashSet::new(),
             grabbed: false,
+            escape_armed: false,
+            escape_signal: false,
         })
     }
 
@@ -52,6 +61,8 @@ impl EvdevCapture {
             }
             self.device.grab()?;
             self.grabbed = true;
+            self.escape_armed = false;
+            self.escape_signal = false;
             log::debug!("evdev grab acquired ({} keys held)", self.keys_at_grab.len());
         }
         Ok(())
@@ -61,6 +72,7 @@ impl EvdevCapture {
         if self.grabbed {
             self.device.ungrab()?;
             self.grabbed = false;
+            self.escape_armed = false;
 
             // Keys the compositor saw go down before the grab but that were
             // released while grabbed need synthetic releases injected via
@@ -104,6 +116,16 @@ impl EvdevCapture {
         events
     }
 
+    /// One-shot: returns true if a Super+M chord was observed since the
+    /// last call. The chord's M events are suppressed from `read_events`
+    /// regardless; this signal tells main to release the grab and re-run
+    /// the user's styx-toggle binding.
+    pub fn take_escape_signal(&mut self) -> bool {
+        let s = self.escape_signal;
+        self.escape_signal = false;
+        s
+    }
+
     pub fn raw_fd(&self) -> std::os::fd::RawFd {
         self.device.as_raw_fd()
     }
@@ -126,10 +148,21 @@ impl EvdevCapture {
                 let code = key_code.0 as u32;
                 match value {
                     1 => {
+                        let super_held = self.held_keys.contains(&styx_keymap::KEY_LEFT_META)
+                            || self.held_keys.contains(&styx_keymap::KEY_RIGHT_META);
+                        if code == styx_keymap::KEY_M && super_held {
+                            self.escape_armed = true;
+                            self.escape_signal = true;
+                            continue;
+                        }
                         self.held_keys.insert(code);
                         out.push(Event::KeyPress { code });
                     }
                     0 => {
+                        if code == styx_keymap::KEY_M && self.escape_armed {
+                            self.escape_armed = false;
+                            continue;
+                        }
                         self.held_keys.remove(&code);
                         out.push(Event::KeyRelease { code });
                     }
@@ -139,6 +172,9 @@ impl EvdevCapture {
                         // Suppress repeats for modifier keys -- they cause
                         // duplicate modifier-down events on macOS which triggers
                         // unintended shortcuts and special characters.
+                        if code == styx_keymap::KEY_M && self.escape_armed {
+                            continue;
+                        }
                         if !styx_keymap::is_modifier(code) {
                             out.push(Event::KeyPress { code });
                         }

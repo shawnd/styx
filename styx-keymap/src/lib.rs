@@ -10,6 +10,8 @@ pub const KEY_RIGHT_SHIFT: u32 = 54;
 pub const KEY_RIGHT_ALT: u32 = 100;
 pub const KEY_RIGHT_META: u32 = 126;
 
+pub const KEY_M: u32 = 50;
+
 pub const MODIFIER_KEYS: &[u32] = &[
     KEY_LEFT_CTRL,
     KEY_LEFT_SHIFT,
