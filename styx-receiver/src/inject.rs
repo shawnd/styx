@@ -204,6 +204,9 @@ impl Injector {
         ) {
             event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx as i64);
             event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy as i64);
+            // Pin flags to actually-held modifiers; otherwise the event
+            // inherits stale flags from the CombinedSessionState source.
+            event.set_flags(self.current_flags());
             event.post(CGEventTapLocation::HID);
         }
 
@@ -267,6 +270,10 @@ impl Injector {
             cg_button,
         ) {
             event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_count);
+            // Pin flags to actually-held modifiers; otherwise the event
+            // inherits stale flags from the CombinedSessionState source,
+            // which leaks a phantom Ctrl onto clicks.
+            event.set_flags(self.current_flags());
             event.post(CGEventTapLocation::HID);
         }
     }

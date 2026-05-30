@@ -17,7 +17,7 @@ use tokio::time;
 use styx_proto::Event;
 
 use capture::{CaptureEvent, Edge};
-use evdev::{AsyncEvdev, EvdevCapture};
+use evdev::EvdevCapture;
 use transport::SenderTransport;
 
 #[derive(Parser)]
@@ -118,22 +118,6 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-fn detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let by_id = std::fs::read_dir("/dev/input/by-id/")?;
-    let mut candidates: Vec<PathBuf> = by_id
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            name.contains("kbd") && name.contains("event") && !name.contains("if0")
-        })
-        .collect();
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no keyboard found in /dev/input/by-id/; set keyboard_device in config".into())
-}
 
 fn resolve_monitors(cfg: &SenderConfig) -> Result<Vec<String>, String> {
     if let Some(list) = &cfg.monitors {
@@ -156,11 +140,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let edge = parse_edge(&config.sender.edge)?;
     let monitors = resolve_monitors(&config.sender)?;
 
-    let kbd_path = match &config.sender.keyboard_device {
-        Some(path) => PathBuf::from(path),
+    // An explicit `keyboard_device` pins a single node (escape hatch). Otherwise
+    // grab every keyboard found and hot-plug new ones, so switching keyboards
+    // (e.g. a wireless dongle re-enumerating as USB) needs no restart.
+    let kbd_paths: Vec<PathBuf> = match &config.sender.keyboard_device {
+        Some(path) => vec![PathBuf::from(path)],
         None => {
-            let detected = detect_keyboard()?;
-            log::info!("auto-detected keyboard: {}", detected.display());
+            let detected = evdev::enumerate_keyboards();
+            if detected.is_empty() {
+                return Err("no keyboard found in /dev/input/by-id/; set keyboard_device in config".into());
+            }
+            log::info!("auto-detected keyboards: {detected:?}");
             detected
         }
     };
@@ -187,8 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut transport = SenderTransport::new(addrs);
     let mut wayland_capture = capture::Capture::new(&monitors, edge)?;
-    let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
-    let mut async_evdev = AsyncEvdev::new(&evdev_capture)?;
+    let mut evdev_capture = EvdevCapture::open(&kbd_paths)?;
     let mut kbd_available = true;
     let mut kbd_recover_interval = time::interval(Duration::from_secs(2));
     kbd_recover_interval.tick().await;
@@ -216,7 +205,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Outer loop: connect, run event loop, reconnect on failure.
     'outer: loop {
-        transport.connect().await?;
+        // `connect` retries forever, so race it against the shutdown signals;
+        // otherwise a `systemctl stop` while the receiver is unreachable would
+        // hang until the unit's SIGKILL timeout (and block any queued start).
+        tokio::select! {
+            r = transport.connect() => { r?; }
+            _ = sigterm.recv() => {
+                log::info!("SIGTERM received while connecting, shutting down");
+                clean_exit = true;
+                break 'outer;
+            }
+            _ = sigint.recv() => {
+                log::info!("SIGINT received while connecting, shutting down");
+                clean_exit = true;
+                break 'outer;
+            }
+        }
         // Brief settle time so the receiver's event loop can start
         // processing before we fire recv().
         time::sleep(Duration::from_millis(50)).await;
@@ -360,8 +364,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                _ = async_evdev.readable(), if capturing && kbd_available => {
-                    match evdev_capture.read_events() {
+                events = evdev_capture.next_events(), if capturing && kbd_available => {
+                    match events {
                         Some(events) => {
                             for event in events {
                                 if let Err(e) = transport.send(&event).await {
@@ -392,17 +396,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 _ = kbd_recover_interval.tick(), if !kbd_available => {
-                    match EvdevCapture::open(&kbd_path) {
-                        Ok(capture) => match AsyncEvdev::new(&capture) {
-                            Ok(ae) => {
+                    let paths: Vec<PathBuf> = match &config.sender.keyboard_device {
+                        Some(path) => vec![PathBuf::from(path)],
+                        None => evdev::enumerate_keyboards(),
+                    };
+                    if !paths.is_empty() {
+                        match EvdevCapture::open(&paths) {
+                            Ok(capture) => {
                                 evdev_capture = capture;
-                                async_evdev = ae;
                                 kbd_available = true;
                                 log::info!("keyboard device recovered");
                             }
-                            Err(e) => log::debug!("keyboard async fd failed: {e}"),
-                        },
-                        Err(_) => {}
+                            Err(e) => log::debug!("keyboard reopen failed: {e}"),
+                        }
                     }
                 }
 
